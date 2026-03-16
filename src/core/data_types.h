@@ -7,6 +7,7 @@
  *   Temperature  → °C   (Kelvin offset applied at reporting layer if needed)
  *   Humidity     → %RH
  *   Pressure     → hPa  (= mbar, numerically identical to mbar)
+ *   Wind speed   → m/s
  */
 
 #ifndef DATA_TYPES_H
@@ -61,14 +62,37 @@ struct AveragedRecord {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Wind Record (WMO 2-min and 10-min averaging windows)         WIND ADDITION
+// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * Produced by WindManager at the end of each 10-minute window.
+ *
+ * WMO Annex 1.A §5:
+ *   - Mean speed:  2-min and 10-min averages, resolution 0.5 m/s
+ *   - Gust:        Maximum 3-s running average in 10-min window, resolution 0.1 m/s
+ */
+struct WindRecord {
+    float    speed_mean_2min;       ///< 2-min mean wind speed [m/s] (most recent 2 min)
+    float    speed_mean_10min;      ///< 10-min mean wind speed [m/s]
+    float    speed_max_3s;          ///< Peak gust: max 3-s running average [m/s]
+    float    speed_min;             ///< Minimum instantaneous speed in 10-min window [m/s]
+    uint32_t total_samples;         ///< Total valid samples in 10-min window
+    uint32_t window_start_ms;       ///< millis() at window start
+    uint32_t window_end_ms;         ///< millis() at window close
+    SensorStatus anem_status;       ///< Anemometer health at window close
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // System Health Snapshot
 // ─────────────────────────────────────────────────────────────────────────────
 struct SystemHealth {
     uint32_t     uptime_sec;
     uint32_t     total_windows_completed;
+    uint32_t     total_wind_windows_completed;  // WIND ADDITION
     uint32_t     total_sample_failures;
     SensorStatus hdc_status;
     SensorStatus bmp_status;
+    SensorStatus anem_status;                   // WIND ADDITION
     uint32_t     free_heap_bytes;
     float        cpu_temperature_c;  ///< ESP32 internal (if available)
 };

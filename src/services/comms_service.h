@@ -1,26 +1,9 @@
 /**
  * @file comms_service.h
- * @brief Communications service placeholder
+ * @brief Communications service — consumes both T/P/RH and wind records
  *
- * This module will handle transmitting averaged meteorological records
- * to remote systems.  Potential transports include:
- *   - Wi-Fi (MQTT, HTTP POST, WebSocket)
- *   - LoRa / LoRaWAN
- *   - Cellular (LTE-M / NB-IoT)
- *   - SD card logging (local "comms")
- *
- * The service consumes AveragedRecord items from the SensorManager's
- * output queue and is designed to run on USER_CORE (Core 1) so that
- * network latency never blocks sensor acquisition.
- *
- * ──────────────────────────────────────────────────────────────────
- *  INTEGRATION GUIDE
- * ──────────────────────────────────────────────────────────────────
- *  1. Implement init() with your transport setup (WiFi.begin, etc.)
- *  2. Implement transmit() to serialise and send the record.
- *  3. Call start() from main.cpp after SensorManager::start().
- *  4. The task loop automatically dequeues records and calls transmit().
- * ──────────────────────────────────────────────────────────────────
+ * Runs on USER_CORE (Core 1), polling both output queues without
+ * blocking sensor acquisition on Core 0.
  */
 
 #ifndef COMMS_SERVICE_H
@@ -35,28 +18,23 @@
 class CommsService {
 public:
     /**
-     * @brief Initialise with the queue that supplies averaged records.
-     * @param recordQueue  Queue handle from SensorManager::getOutputQueue().
+     * @brief Initialise with output queues.
+     * @param recordQueue  AveragedRecord queue from SensorManager.
+     * @param windQueue    WindRecord queue from WindManager (may be nullptr).
      */
-    explicit CommsService(QueueHandle_t recordQueue);
+    CommsService(QueueHandle_t recordQueue, QueueHandle_t windQueue = nullptr);
 
-    /**
-     * @brief Start the comms task on USER_CORE (Core 1).
-     */
     bool start();
 
 private:
     static void taskEntry(void* param);
     void taskLoop();
 
-    /**
-     * @brief Transmit a single averaged record.
-     * Override / modify this for your chosen transport.
-     * @return true if transmission succeeded.
-     */
     bool transmit(const AveragedRecord& record);
+    bool transmitWind(const WindRecord& record);
 
     QueueHandle_t _recordQueue;
+    QueueHandle_t _windQueue;
     TaskHandle_t  _taskHandle = nullptr;
 };
 

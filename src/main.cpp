@@ -5,6 +5,7 @@
  * Target:  ESP32-WROOM-32D
  * Sensors: Adafruit HDC3022 (temperature / humidity)
  *          Adafruit BMP585  (pressure / temperature)
+ *          PR-300-FSJT-V05  (wind speed, 0–5V analog)
  *
  * ╔═══════════════════════════════════════════════════════════════════╗
  * ║                    SYSTEM ARCHITECTURE                          ║
@@ -12,33 +13,41 @@
  * ║                                                                 ║
  * ║  Core 0 (APP_CORE) — Deterministic Acquisition                  ║
  * ║  ┌──────────────────────────────────────┐                       ║
- * ║  │ Software Timer (5 s)                 │                       ║
- * ║  │   └─► Task Notification              │                       ║
- * ║  │         └─► SensorSample Task (P:5)  │                       ║
- * ║  │               ├─ HDC3022::read()     │                       ║
- * ║  │               ├─ BMP585::read()      │                       ║
- * ║  │               ├─ Accumulate          │                       ║
- * ║  │               └─ Every 12th sample:  │                       ║
- * ║  │                    Average → Queue   │                       ║
+ * ║  │ SW Timer (250 ms / 4 Hz)             │                       ║
+ * ║  │   └─► WindSample Task (P:6)          │                       ║
+ * ║  │         ├─ ADC 16x oversample        │                       ║
+ * ║  │         ├─ 3-s running avg (gust)    │                       ║
+ * ║  │         ├─ 2-min & 10-min accum      │                       ║
+ * ║  │         └─ @10 min: WindRecord → Q   │                       ║
+ * ║  │                                      │                       ║
+ * ║  │ SW Timer (5 s)                       │                       ║
+ * ║  │   └─► SensorSample Task (P:5)       │                       ║
+ * ║  │         ├─ HDC3022::read()           │                       ║
+ * ║  │         ├─ BMP585::read()            │                       ║
+ * ║  │         └─ @12th: AveragedRecord → Q │                       ║
  * ║  └──────────────────────────────────────┘                       ║
  * ║                          │                                      ║
- * ║                    OutputQueue (5 deep)                          ║
+ * ║               Output Queues (separate)                           ║
  * ║                          │                                      ║
  * ║  Core 1 (USER_CORE) — Non-Critical Services                     ║
  * ║  ┌──────────────────────────────────────┐                       ║
  * ║  │ CommsTask (P:3)                      │                       ║
  * ║  │   └─ Dequeue → JSON → Serial/MQTT   │                       ║
  * ║  │                                      │                       ║
- * ║  │ HealthTask (P:1)   [placeholder]     │                       ║
+ * ║  │ HealthTask (P:1)                     │                       ║
  * ║  │ ControlTask (P:2)  [placeholder]     │                       ║
  * ║  └──────────────────────────────────────┘                       ║
  * ║                                                                 ║
  * ╚═══════════════════════════════════════════════════════════════════╝
  *
- * WMO Compliance (WMO-No. 8, 2024, Annex 1.A):
- *   • Sample interval:  5 s  (12 samples per window)
- *   • Averaging window: 60 s (1 min)
+ * WMO Compliance (WMO-No. 8, 2024, Annex 1.A + Chapter 5):
+ *   • T/P/RH sample interval:  5 s  (12 samples per 1-min window)
+ *   • T/P/RH averaging window: 60 s (1 min)
  *   • Output resolution: T=0.1°C, RH=1%, P=0.1 hPa
+ *   • Wind sample interval:    250 ms (4 Hz)
+ *   • Wind gust:               max 3-s running average (overlapping every 250 ms)
+ *   • Wind averaging:          2-min and 10-min windows
+ *   • Wind resolution:         mean 0.5 m/s, gust 0.1 m/s
  *
  * Dependencies (PlatformIO / Arduino):
  *   - Adafruit_HDC302x
@@ -53,6 +62,7 @@
 #include "hal/sensor_hdc3022.h"
 #include "hal/sensor_bmp585.h"
 #include "core/sensor_manager.h"
+#include "core/wind_manager.h"
 #include "services/comms_service.h"
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -61,6 +71,7 @@
 static SensorHDC3022  hdc3022(HDC3022_I2C_ADDR);
 static SensorBMP585   bmp585(BMP585_I2C_ADDR);
 static SensorManager  sensorMgr;
+static WindManager    windMgr;
 static CommsService*  comms = nullptr;   // Heap-allocated after queue is ready
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -75,13 +86,19 @@ static void healthTask(void* param) {
 
         SystemHealth h = mgr->getHealth();
 
+        // Merge wind status from the global WindManager
+        h.anem_status = windMgr.status();
+        h.total_wind_windows_completed = windMgr.windowsCompleted();
+
         Serial.println(F("──── System Health ────"));
         Serial.printf("  Uptime       : %lu s\n", h.uptime_sec);
-        Serial.printf("  Windows done : %lu\n",   h.total_windows_completed);
+        Serial.printf("  T/P/RH wins  : %lu\n",   h.total_windows_completed);
+        Serial.printf("  Wind wins    : %lu\n",   h.total_wind_windows_completed);
         Serial.printf("  Sample fails : %lu\n",   h.total_sample_failures);
         Serial.printf("  Free heap    : %lu bytes\n", h.free_heap_bytes);
         Serial.printf("  HDC status   : %u\n", (uint8_t)h.hdc_status);
         Serial.printf("  BMP status   : %u\n", (uint8_t)h.bmp_status);
+        Serial.printf("  ANEM status  : %u\n", (uint8_t)h.anem_status);
         Serial.println(F("───────────────────────"));
     }
 }
@@ -123,29 +140,36 @@ void setup() {
     }
     Serial.printf("[I2C] Scan complete — %u device(s) found\n\n", devicesFound);
 
-    // ── Step 2: Register sensors ──
-    sensorMgr.registerSensor(&hdc3022);
+    // ── Step 2: Register I2C sensors ──
+    // BMP585 first: its address (0x47) was confirmed on-bus by the scan.
+    // Some Adafruit libraries call Wire.begin() internally, which can
+    // disrupt ESP32 I2C; initialising the known-good sensor first
+    // ensures at least one sensor comes up even if the other fails.
     sensorMgr.registerSensor(&bmp585);
+    sensorMgr.registerSensor(&hdc3022);
 
-    // Future sensors would be registered here:
-    //   sensorMgr.registerSensor(&windSensor);
+    // Future I2C sensors would be registered here:
     //   sensorMgr.registerSensor(&rainGauge);
     //   sensorMgr.registerSensor(&solarRadiation);
 
-    // ── Step 3: Start acquisition engine (Core 0) ──
+    // ── Step 3: Start I2C acquisition engine (Core 0, 5 s interval) ──
     if (!sensorMgr.start()) {
         Serial.println(F("FATAL: SensorManager start failed. Halting."));
         for (;;) vTaskDelay(portMAX_DELAY);
     }
 
-    // ── Step 4: Start communications service (Core 1) ──
-    comms = new CommsService(sensorMgr.getOutputQueue());
-    if (!comms->start()) {
-        Serial.println(F("WARNING: Comms service failed to start"));
-        // Non-fatal — acquisition continues, data accumulates in queue
+    // ── Step 4: Start wind acquisition (Core 0, 4 Hz / 250 ms) ──
+    if (!windMgr.start()) {
+        Serial.println(F("WARNING: WindManager failed to start — continuing without wind"));
     }
 
-    // ── Step 5: Start health monitor (Core 1) ──
+    // ── Step 5: Start communications service (Core 1) ──
+    comms = new CommsService(sensorMgr.getOutputQueue(), windMgr.getOutputQueue());
+    if (!comms->start()) {
+        Serial.println(F("WARNING: Comms service failed to start"));
+    }
+
+    // ── Step 6: Start health monitor (Core 1) ──
     xTaskCreatePinnedToCore(
         healthTask,
         "HealthMon",

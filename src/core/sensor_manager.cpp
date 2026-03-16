@@ -8,6 +8,7 @@
 #include <cfloat>
 #include <cstring>
 #include "Arduino.h"
+#include "../hal/i2c_bus.h"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Construction
@@ -43,7 +44,10 @@ bool SensorManager::start() {
         return false;
     }
 
-    // Initialise all registered sensors
+    // Initialise all registered sensors.
+    // Re-apply I2C config after each attempt because some Adafruit
+    // libraries call Wire.begin() internally, which can disrupt the
+    // ESP32 I2C peripheral and cause subsequent sensors to fail.
     uint8_t ok_count = 0;
     for (auto* s : _sensors) {
         if (s->begin()) {
@@ -51,6 +55,7 @@ bool SensorManager::start() {
         } else {
             Serial.printf("[SensorMgr] WARNING: %s init failed\n", s->name());
         }
+        g_i2c.reinit();
     }
 
     if (ok_count == 0) {
@@ -326,16 +331,19 @@ bool SensorManager::getLatestRecord(AveragedRecord& record) const {
 }
 
 SystemHealth SensorManager::getHealth() const {
-    SystemHealth h;
+SystemHealth h;
+    memset(&h, 0, sizeof(h));
     h.uptime_sec = millis() / 1000;
     h.total_windows_completed = _totalWindows;
+    h.total_wind_windows_completed = 0;  // Set by caller (main.cpp healthTask)
     h.total_sample_failures = _totalFailures;
     h.free_heap_bytes = esp_get_free_heap_size();
-    h.cpu_temperature_c = 0.0f;  // ESP32 internal temp sensor (if enabled)
+    h.cpu_temperature_c = 0.0f;
 
     // Find sensor statuses
-    h.hdc_status = SensorStatus::NOT_PRESENT;
-    h.bmp_status = SensorStatus::NOT_PRESENT;
+    h.hdc_status  = SensorStatus::NOT_PRESENT;
+    h.bmp_status  = SensorStatus::NOT_PRESENT;
+    h.anem_status = SensorStatus::NOT_PRESENT;  // Set by caller
     for (auto* s : _sensors) {
         if (strcmp(s->name(), "HDC3022") == 0) h.hdc_status = s->status();
         if (strcmp(s->name(), "BMP585") == 0)  h.bmp_status = s->status();

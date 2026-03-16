@@ -51,10 +51,13 @@ void SensorBMP585::configureForMeteorology() {
      * Oversampling settings for meteorological use:
      *   Pressure OSR = 128x  → ~1.3 Pa RMS noise (~0.013 hPa)
      *   Temperature OSR = 8x → sufficient for compensation
+     *   Conversion time: ~107 ms (dominated by P_OSR=128x)
      *
      * IIR filter coefficient = 3 (moderate smoothing).
-     * At 5 s sampling this adds negligible group delay while
-     * suppressing pressure spikes from door slams, gusts, etc.
+     * With alpha = 1/(3+1) = 0.25 at ODR 0.25 Hz (4 s internal period),
+     * the effective time constant is ~14 s (group delay ~14 s, 95%
+     * settling ~42 s).  This is acceptable for 1-min WMO averaging
+     * and suppresses pressure spikes from door slams, gusts, etc.
      *
      * The Adafruit BMP581 library provides setTemperatureOversampling()
      * and setPressureOversampling() methods.
@@ -63,12 +66,12 @@ void SensorBMP585::configureForMeteorology() {
     _bmp.setPressureOversampling(BMP5XX_OVERSAMPLING_128X);
     _bmp.setIIRFilterCoeff(BMP5XX_IIR_FILTER_COEFF_3);
 
-    // Set ODR to suit forced-mode triggering (we trigger on demand)
-    _bmp.setOutputDataRate(BMP5XX_ODR_0_125_HZ);  // Low ODR; we use forced mode
+    // ODR must be >= 0.2 Hz so data registers refresh within each 5 s sample interval
+    _bmp.setOutputDataRate(BMP5XX_ODR_0_250_HZ);  // 4 s period; fresh data for 5 s sampling
 
     g_i2c.unlock();
 
-    Serial.println(F("[BMP585] Configured: P_OSR=128x, T_OSR=8x, IIR=3"));
+    Serial.println(F("[BMP585] Configured: P_OSR=128x, T_OSR=8x, IIR=3, ODR=0.25Hz"));
 }
 
 bool SensorBMP585::read(RawSample& sample) {
@@ -86,11 +89,11 @@ bool SensorBMP585::read(RawSample& sample) {
     float bmp_temp = 0.0f;
 
     for (uint8_t retry = 0; retry <= I2C_MAX_RETRIES; ++retry) {
-        // performReading triggers a forced-mode measurement and
-        // stores results in _bmp.pressure (hPa) and _bmp.temperature (°C)
+        // performReading reads the latest data registers (normal mode)
+        // and stores results in _bmp.pressure (hPa) and _bmp.temperature (°C)
         if (_bmp.performReading()) {
-            pressure = _bmp.pressure;  // already in hPa
-            bmp_temp = _bmp.temperature;         // °C
+            pressure = _bmp.pressure;  // Adafruit_BMP5xx returns hPa
+            bmp_temp = _bmp.temperature;          // °C
             success = true;
             break;
         }

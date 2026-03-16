@@ -46,6 +46,16 @@ public:
      */
     bool probe(uint8_t addr);
 
+    /**
+     * @brief Re-apply I2C pin and clock configuration.
+     *
+     * Some Adafruit libraries call Wire.begin() internally, which can
+     * reinitialise the ESP32 I2C peripheral and disrupt subsequent
+     * transactions.  Call this after any library init to restore the
+     * bus to a known-good state.
+     */
+    void reinit();
+
 private:
     SemaphoreHandle_t _mutex = nullptr;
     bool              _initialised = false;

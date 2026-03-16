@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:docs.espressif.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:www.bosch-sensortec.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:www.fredscave.com)",
+      "WebFetch(domain:community.platformio.org)",
+      "WebFetch(domain:cdn.sparkfun.com)",
+      "WebFetch(domain:download.mikroe.com)"
+    ]
+  }
+}

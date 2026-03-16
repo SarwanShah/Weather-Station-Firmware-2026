@@ -42,6 +42,11 @@ TwoWire& I2CBus::wire() {
     return Wire;
 }
 
+void I2CBus::reinit() {
+    Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+    Wire.setClock(I2C_FREQ_HZ);
+}
+
 bool I2CBus::probe(uint8_t addr) {
     if (!lock()) return false;
 
